@@ -63,7 +63,7 @@ def MeanShiftIteration(lkh, values, counts, domain_span, kernel_r, init_pos, ver
 
 def DrawRectOnImage(im, top_left, bot_right, color=(0, 255, 0)):
     thickness = 2
-    im = cv2.rectangle(im, top_left, bot_right, color, thickness)
+    im = cv2.rectangle(im, (top_left[1], top_left[0]), (bot_right[1], bot_right[0]), color, thickness)
     return im
 
 def cv2_imshow(image, imname='image'):
@@ -84,7 +84,7 @@ EPS = np.finfo(np.float32).eps
 HIST_BINS = 100
 
 def ComputeAllImageHistogram(image):
-    image_histo = NpHisto(image, HIST_BINS)  # Ignore last channel for HSV
+    image_histo = NpHisto(image[:, :, 0], HIST_BINS)  # Ignore last channel for HSV
     image_histo_normalized = (image_histo / np.sum(image_histo)) + EPS
     return image_histo_normalized
 
@@ -107,7 +107,14 @@ def main():
     #       Cyclist's head is increasing in size.
     #       The helmet itself is colored like a sky, so it's importance is dumped.
     #       There is a killing moment when tracked head goes out of the frame at all.
-    # with open("data/Biker/Biker/groundtruth_rect.txt") as expected_rects:
+    with open("data/Biker/Biker/groundtruth_rect.txt") as expected_rects:
+    # with open("data/Panda/Panda/groundtruth_rect.txt") as expected_rects:
+    # with open("data/Walking/Walking/groundtruth_rect.txt") as expected_rects:
+    # with open("data/Dancer2/Dancer2/groundtruth_rect.txt") as expected_rects:
+    # with open("data/Sylvester/Sylvester/groundtruth_rect.txt") as expected_rects:
+
+    # with open("data/Bird1/Bird1/groundtruth_rect.txt") as expected_rects:
+    # with open("data/RedTeam/RedTeam/groundtruth_rect.txt") as expected_rects:
 
     # Subj: tracking runner at the competiontions (amongst other runners).
     # Pros: Consistantly colored track at the background.
@@ -115,18 +122,25 @@ def main():
     #       Position of the runner on a frame does not change much.
     # Cons: Frame itself is moving heavily.
     #       Different bunners come to the frame what changes the scene's histogram heavily.
-    with open("data/Bolt/Bolt/groundtruth_rect.txt") as expected_rects:
+    # with open("data/Bolt/Bolt/groundtruth_rect.txt") as expected_rects:
         line = expected_rects.readline()
+        # bboxValue = [ int(val) for val in line.split('\t') if len(val) != 0]
         bboxValue = [ int(val) for val in line.split(',') if len(val) != 0]
-        bb_top_left[0] = bboxValue[0]
-        bb_top_left[1] = bboxValue[1]
+        bb_top_left[1] = bboxValue[0]
+        bb_top_left[0] = bboxValue[1]
         bb_width = bboxValue[2]
         bb_height = bboxValue[3]
 
 
     dataset = []
-    # im_dir_name = "data/Biker/Biker/img"
-    im_dir_name = "data/Bolt/Bolt/img"
+    im_dir_name = "data/Biker/Biker/img"
+    # im_dir_name = "data/Panda/Panda/img"
+    # im_dir_name = "data/Walking/Walking/img"
+    # im_dir_name = "data/Bolt/Bolt/img"
+    # im_dir_name = "data/Bird1/Bird1/img"
+    # im_dir_name = "data/RedTeam/RedTeam/img"
+    # im_dir_name = "data/Sylvester/Sylvester/img"
+    # im_dir_name = "data/Dancer2/Dancer2/img"
     for impath in tqdm(os.listdir(im_dir_name)):
         image = cv2.imread(join(im_dir_name, impath), cv2.IMREAD_COLOR)
         dataset.append(cv2.cvtColor(image, cv2.COLOR_BGR2HSV))
@@ -134,84 +148,122 @@ def main():
 
     im = dataset[0]
     # init stage
-    start_point = (bb_top_left[0], bb_top_left[1])
-    end_point = (start_point[0] + bb_width, start_point[1] + bb_height)
+    # start_point = (bb_top_left[0], bb_top_left[1])
+    # end_point = (start_point[0] + bb_width, start_point[1] + bb_height)
 
     # Checking initial stage.
     drawn_im = DrawRectOnImage(im,
-                               top_left=(bb_top_left[0], bb_top_left[1]),
-                               bot_right=(bb_top_left[0] + bb_width, bb_top_left[1] + bb_height))
+                               top_left=bb_top_left,
+                               bot_right=bb_top_left + np.array([bb_height, bb_width]))
     plt.imshow(drawn_im)
     plt.show()
 
     image_histo_normalized = ComputeAllImageHistogram(im)
 
-    reference_patch = im[bb_top_left[1]:bb_top_left[1]+bb_height, bb_top_left[0]:bb_top_left[0]+bb_width]
+    reference_patch = im[bb_top_left[0]:bb_top_left[0]+bb_height, bb_top_left[1]:bb_top_left[1]+bb_width]
     reference_histo_normalized = ComputeAllImageHistogram(reference_patch)
     reference_histo_normalized /= image_histo_normalized
     reference_histo_normalized /= np.sum(reference_histo_normalized) + EPS
 
-    old_center = np.round((np.array(start_point) + np.array(end_point)) / 2)
-
     # We use this radius to check potential updated positions for the tracked object
-    R = np.sqrt(bb_height * bb_height + bb_width + bb_width)
-    for new_im in dataset[1:]:
-        likelyhood_im_shape = (im.shape[0] - bb_height, im.shape[1] - bb_width)
+    R = np.sqrt(bb_height * bb_height + bb_width * bb_width) / 2
+
+    for new_im in dataset[0:]:
+        # new_im = dataset[0]
+        likelyhood_im_shape = (new_im.shape[0] - bb_height, new_im.shape[1] - bb_width)
         likelyhood_im = np.zeros(likelyhood_im_shape)
-        c_range = range(int(max(0, old_center[0] - R / 2)), int(min(likelyhood_im_shape[1], old_center[0] + R / 2)))
-        r_range = range(int(max(0, old_center[1] - R / 2)), int(min(likelyhood_im_shape[0], old_center[1] + R / 2)))
 
-        # for row in tqdm(range(likelyhood_im_shape[0])):
-        for row in tqdm(r_range):
-            # for col in range(likelyhood_im_shape[1]):
-            for col in c_range:
-                patch = new_im[row:row+bb_height, col:col+bb_width]
-                patch_histo_normalized = ComputeAllImageHistogram(patch)
-                patch_histo_normalized /= image_histo_normalized
-                patch_histo_normalized /= (np.sum(patch_histo_normalized) + EPS)
-                histo_diff = reference_histo_normalized - patch_histo_normalized
-                likelyhood = 1 - np.linalg.norm(histo_diff)
-                likelyhood_im[row, col] = likelyhood
+        bb_top_left_iteration = bb_top_left
+        offset = np.array([2, 2]) # initial value for the offset
+        iterations = 0
+        while np.linalg.norm(offset) != 0:
 
-        # TODO: compute weights without allocation of full-size image.
-        weights = likelyhood_im[r_range.start:r_range.stop - 1, c_range.start: c_range.stop - 1]
+            r_range = range(int(max(0, bb_top_left_iteration[0] - bb_height/2)), int(min(likelyhood_im_shape[0], bb_top_left_iteration[0] + bb_height/2)))
+            c_range = range(int(max(0, bb_top_left_iteration[1] - bb_width/2)), int(min(likelyhood_im_shape[1], bb_top_left_iteration[1] + bb_width/2)))
 
-        coords = np.mgrid[r_range.start:r_range.stop - 1, c_range.start: c_range.stop - 1]
-        coords = coords.reshape(coords.shape[0], coords.shape[1]*coords.shape[2]).T
-        weights = np.reshape(weights, (weights.shape[0]*weights.shape[1]))
-        new_mean = np.average(coords,
-                              weights=weights,
-                              axis=0)
-        new_mean = np.round(new_mean).astype(int)
+            # for row in tqdm(range(likelyhood_im_shape[0])):
+            for row in tqdm(r_range):
+                # for col in range(likelyhood_im_shape[1]):
+                for col in c_range:
+                    dist_to_point = np.linalg.norm(bb_top_left - np.array([row, col]))
+                    already_computed = likelyhood_im[row, col] != 0
+                    # if dist_to_point > R or already_computed != 0:
+                    if already_computed:
+                        continue
 
-        old_center = old_center.astype(int)
+                    patch = new_im[row:row+bb_height, col:col+bb_width]
+                    patch_histo_normalized = ComputeAllImageHistogram(patch)
+                    patch_histo_normalized /= image_histo_normalized
+                    patch_histo_normalized /= (np.sum(patch_histo_normalized) + EPS)
+                    histo_diff = reference_histo_normalized - patch_histo_normalized
+                    likelyhood = 1 - np.linalg.norm(histo_diff)
+                    likelyhood_im[row, col] = likelyhood
 
-        offset = new_mean - [old_center[1], old_center[0]]
-        old_center = np.array([new_mean[1], new_mean[0]])
+            # plt.imshow(likelyhood_im)
+            # plt.show()
 
-        patch = new_im[row:row + bb_height, col:col + bb_width]
-        patch_histo_normalized = ComputeAllImageHistogram(patch)
+            # TODO: compute weights without allocation of full-size image.
+            likelyhood_reg = likelyhood_im[r_range.start:r_range.stop, c_range.start: c_range.stop]
+            # print("Reg area:", likelyhood_reg.shape[0] * likelyhood_reg.shape[1])
+            # plt.imshow(likelyhood_reg)
+            # plt.show()
+            coords = np.mgrid[r_range.start:r_range.stop, c_range.start: c_range.stop]
+            coords = coords.reshape(coords.shape[0], coords.shape[1]*coords.shape[2]).T
+            likelyhood_reg = np.reshape(likelyhood_reg, (likelyhood_reg.shape[0]*likelyhood_reg.shape[1]))
+            new_top_left = np.average(coords,
+                                      weights=likelyhood_reg,
+                                      axis=0)
+            # new_top_left = np.unravel_index(np.argmax(likelyhood_im), likelyhood_im.shape)
+
+            new_top_left = np.round(new_top_left).astype(int)
+            # placed_mean = cv2.circle(likelyhood_im, (new_top_left[1], new_top_left[0]), 1, (0), 1)
+            # likelyhood_reg2 = placed_mean[r_range.start:r_range.stop, c_range.start: c_range.stop]
+            # plt.imshow(likelyhood_reg2)
+            # plt.show()
+
+            offset = new_top_left - bb_top_left_iteration
+            bb_top_left_iteration = new_top_left
+            print("Offset on iter:", offset)
+            iterations += 1
+
+        print("Iterations :", iterations)
+
+        # bb_top_left += new_top_left
+        # Confiring update on this stage
+        bb_top_left = bb_top_left_iteration
+
+        # Display old position
+        drawn_im = DrawRectOnImage(new_im,
+                                   top_left=bb_top_left,
+                                   bot_right=bb_top_left + np.array([bb_height, bb_width]),
+                                   color=(0, 0, 255))
+
+        # bb_top_left += offset
+        new_reference_patch = new_im[bb_top_left[0]:bb_top_left[0] + bb_height, bb_top_left[1]:bb_top_left[1] + bb_width]
+        new_reference_patch_normalized = ComputeAllImageHistogram(new_reference_patch)
         image_histo_normalized = ComputeAllImageHistogram(new_im)
 
         # Tracked histogram update stage.
         # Better to avoid absolute change, as jerks in move could cause to total lost of track.
-        reference_histo_normalized = patch_histo_normalized / image_histo_normalized
+        ALPHA = 0.1
+        # reference_histo_normalized = new_reference_patch_normalized
+        reference_histo_normalized = (reference_histo_normalized * (1 - ALPHA) + ALPHA * new_reference_patch_normalized)
         reference_histo_normalized /= np.sum(reference_histo_normalized) + EPS
 
         # Update old im
         # im = new_im
 
-        drawn_im = DrawRectOnImage(new_im,
-                                   top_left=(bb_top_left[0], bb_top_left[1]),
-                                   bot_right=(bb_top_left[0] + bb_width, bb_top_left[1] + bb_height),
-                                   color=(0, 0, 255))
-        bb_top_left += offset
+        # Display new position
         drawn_im = DrawRectOnImage(drawn_im,
-                                   top_left=(bb_top_left[0], bb_top_left[1]),
-                                   bot_right=(bb_top_left[0] + bb_width, bb_top_left[1] + bb_height),
+                                   top_left=bb_top_left,
+                                   bot_right=bb_top_left + np.array([bb_height, bb_width]),
                                    color=(0, 255, 0))
         plt.imshow(drawn_im)
-        plt.pause(0.001)
+        plt.pause(0.2)
+        # likelyhood_im = cv2.cricle(likelyhood_im, ())
+        # plt.imshow(likelyhood_im)
+        # plt.pause(0.2)
+
 
 if __name__ == "__main__":
     main()

@@ -15,12 +15,13 @@ EPS = np.finfo(np.float32).eps
 
 # Hyperparameters : knobs for tuning collected in 1 place.
 HIST_BINS = 16
-ALLOWED_ITERATIONS = 3
+ALLOWED_ITERATIONS = 4
 DROP_EACH_KTH_PIXEL = 2
 ALPHA = 0.0
 IMAGE_HISTO_CORRECTION_PERIOD = 5
-DISPLAY_FRAME_PERIOD = 20
+DISPLAY_FRAME_PERIOD = 1
 N_CHANNELS_USED = 1
+
 
 def draw_rect_on_image(im, top_left, bot_right, color=(0, 255, 0)):
     thickness = 1
@@ -50,6 +51,7 @@ def read_init_data():
     bb_top_left = [-1, -1]
     bb_width = -1
     bb_height = -1
+    bb_ratio = -1
     bb_requires_init = True
 
     # Expected image path and path to file where bounding box is defined
@@ -132,6 +134,7 @@ def main():
     print('Argument List:', str(sys.argv))
 
     im_dir_name, bb_top_left, bb_width, bb_height = read_init_data()
+    compensation_for_dropped_pixels = 1 / (1 - 1 / DROP_EACH_KTH_PIXEL)
 
     dataset = []
     print("Using images from ", im_dir_name)
@@ -161,10 +164,12 @@ def main():
     # We use this radius to check potential updated positions for the tracked object
     R = np.sqrt(bb_height * bb_height + bb_width * bb_width) / 2
 
+    stored_bbox_sizes = []
+
     for frame_index, new_im in tqdm(enumerate(dataset[1:])):
 
         likelihood_im_shape = (new_im.shape[0] - bb_height, new_im.shape[1] - bb_width)
-        likelihood_im = np.zeros(likelihood_im_shape)
+        likelihoods_im = np.zeros(likelihood_im_shape)
 
         bb_top_left_iteration = bb_top_left
         offset = np.array([2, 2])  # Some initial value for the offset
@@ -193,11 +198,10 @@ def main():
                     # Sampling not all histograms inside ROI, mod with prime will give decent semi-random pattern.
                     # For some datasets works worse ("Walking", a.e.)
                     pix_index += 1
-                    # if pix_index % DROP_EACH_K_PIXEL == 0:
-                    if pix_index % 5 != 0:
+                    if pix_index % DROP_EACH_KTH_PIXEL == 0:
                         continue
 
-                    already_computed = likelihood_im[row, col] != 0
+                    already_computed = likelihoods_im[row, col] != 0
 
                     # Using tracking with circular lookup region to handle cases with narrow frames.
                     dist_to_point = np.linalg.norm(bb_top_left_iteration - np.array([row, col]))
@@ -210,12 +214,12 @@ def main():
                     patch_likelihood /= np.sum(patch_likelihood)
                     histo_diff = reference_likelihood - patch_likelihood
                     likelihood = 1 - np.linalg.norm(histo_diff)
-                    likelihood_im[row, col] = likelihood
+                    likelihoods_im[row, col] = likelihood
 
             coordinates = np.mgrid[r_range.start:r_range.stop, c_range.start: c_range.stop]
             coordinates = coordinates.reshape(coordinates.shape[0], coordinates.shape[1] * coordinates.shape[2]).T
 
-            likelihood_reg = likelihood_im[r_range.start:r_range.stop, c_range.start: c_range.stop]
+            likelihood_reg = likelihoods_im[r_range.start:r_range.stop, c_range.start: c_range.stop]
             likelihood_reg = np.reshape(likelihood_reg, (likelihood_reg.shape[0] * likelihood_reg.shape[1]))
 
             new_top_left = np.average(coordinates,
@@ -225,10 +229,10 @@ def main():
 
             # Selection of max value in giver region is also working alternative.
             # If likelihood function is broken will not work either, so useful for experiments.
-            # new_top_left = np.unravel_index(np.argmax(likelihood_im), likelihood_im.shape)
+            # new_top_left = np.unravel_index(np.argmax(likelihoods_im), likelihoods_im.shape)
 
             # Shows computed "costmap" enlarged and with center marked.
-            # likelihood_im_with_point = cv2.circle(likelihood_im, (new_top_left[1], new_top_left[0]), 1, 0)
+            # likelihood_im_with_point = cv2.circle(likelihoods_im, (new_top_left[1], new_top_left[0]), 1, 0)
             # likelihood_reg = likelihood_im_with_point[r_range.start:r_range.stop, c_range.start: c_range.stop]
             # plt.imshow(likelihood_reg_with_mean_point)
             # plt.show()
@@ -238,7 +242,56 @@ def main():
             # print("Offset on iter:", offset)
             iterations += 1
 
+        # CAMShift stage of adding positioning to the barycenter:
+        # if frame_index % 10 == 0:
+
+        bb_ratio = bb_height / bb_width
+        r, c = bb_top_left_iteration
+
         bb_top_left = bb_top_left_iteration  # update overall hypothesis on border box
+
+        likelihood_region = likelihoods_im[r - bb_height//2: r + bb_height//2,
+                                           c - bb_width//2: c + bb_width//2]
+        M00 = np.sum(likelihood_region) #* compensation_for_dropped_pixels
+        bb_width_recommended = np.round(2 * np.sqrt(M00)).astype(int)
+        bb_height_recommended = np.round(bb_width_recommended * bb_ratio).astype(int)
+        stored_bbox_sizes.append([bb_width_recommended, bb_height_recommended])
+        if len(stored_bbox_sizes) > 5:
+            recommended_track_window_sizes = np.mean(stored_bbox_sizes, axis=0)
+            bb_width2, bb_height2 = np.round(recommended_track_window_sizes).astype(int)
+            bb_top_left_offset = [(bb_width2 - bb_width) // 2, (bb_height2 - bb_height) // 2]
+            bb_top_left -= bb_top_left_offset
+            bb_top_left = [max(bb_top_left[0], 0), max(bb_top_left[1], 0)]
+            bb_width, bb_height = bb_width2, bb_height2
+            stored_bbox_sizes = stored_bbox_sizes[2:]
+
+        # r, c = bb_top_left_iteration
+        # r -= bb_height//2
+        # c -= bb_width//2
+        # likelihood_region = likelihoods_im[r:r + bb_height, c:c + bb_width]
+        # coordinates = np.mgrid[r:r + bb_height, c:c + bb_width]
+        # M00 = np.sum(likelihood_region)
+        # M10 = np.sum(coordinates[0, :, :] * likelihood_region)
+        # M01 = np.sum(coordinates[1, :, :] * likelihood_region)
+        # baricenter_row = M10 / M00
+        # baricenter_col = M01 / M00
+        # bb_top_left = np.round([baricenter_row, baricenter_col]).astype(int)
+        # print(max([bb_top_left_iteration - bb_top_left))
+        # print("baricenter correction : ", bb_top_left - bb_top_left_iteration)
+        # likelihood_im_with_points = cv2.circle(likelihood_region,
+        #                                        (new_top_left[1] - bb_top_left_iteration[1], new_top_left[0] - bb_top_left_iteration[0]),
+        #                                        1,
+        #                                        0)
+        # likelihood_im_with_points = cv2.circle(likelihood_region,
+        #                                        (new_top_left[1] - bb_top_left_iteration[1],
+        #                                         new_top_left[0] - bb_top_left_iteration[0]),
+        #                                        1,
+        #                                        0)
+        # plt.imshow(likelihood_region)
+        # plt.show()
+        # M01 = np.sum(patch * coordinates)
+
+
         new_reference_patch = new_im[bb_top_left[0]:bb_top_left[0] + bb_height,
                                      bb_top_left[1]:bb_top_left[1] + bb_width]
         new_reference_patch_normalized = compute_image_histogram(new_reference_patch)
@@ -257,11 +310,11 @@ def main():
                                           top_left=bb_top_left,
                                           bot_right=bb_top_left + np.array([bb_height, bb_width]),
                                           color=(0, 255, 0))
-            plt.close()
-            fig = plt.figure("Frame {}".format(frame_index))
-            plt.imshow(drawn_im[:, :, 2])
-            plt.pause(0.1)
-            # plt.imshow(likelihood_im)
+            # plt.close()
+            # fig = plt.figure("Frame {}".format(frame_index))
+            plt.imshow(drawn_im[:, :, 1])
+            plt.pause(0.2)
+            # plt.imshow(likelihoods_im)
             # plt.pause(2)
 
     # Final frame display.
